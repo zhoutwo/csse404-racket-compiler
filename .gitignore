@@ -5,3 +5,9 @@
 *.scm~
 *.scm#*
 .#*.scm
+
+*.out
+*.o
+
+*.s
+a.out.dSYM/
