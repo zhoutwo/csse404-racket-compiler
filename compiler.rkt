@@ -3,7 +3,7 @@
 (require "interp.rkt")
 (require "utilities.rkt")
 
-(provide r0-passes r1-passes)
+(provide r0-passes r1-passes r1-with-register-allocation-passes)
 
 ;; Begin R0 compiler
 
@@ -83,7 +83,7 @@
 (define (member? ls a)
   (if (null? ls)
       #f
-      (or (eq? (car ls) a)
+      (or (equal? (car ls) a)
           (member? (cdr ls) a))))
 
 (define (remove-repeated ls)
@@ -111,7 +111,7 @@
                 (define-values (lastSym flattened allVars) ((flatten-helper alist) e))
                 (values
                   '()
-                  `(program ,allVars ,@flattened (return ,lastSym))
+                  `(program ,(remove-repeated allVars) ,@flattened (return ,lastSym))
                   allVars))]
       [`(read)
               (let ([newSym (gensym)])
@@ -172,7 +172,10 @@
   (lambda (e)
     (match e
       [`(var ,vname)
-              `(deref rbp ,(- (car (lookup vname varlocs))))]
+              (let ([loc (car (lookup vname varlocs))])
+                    (if (number? loc)
+                      `(deref rbp ,(- loc))
+                      `(reg ,loc)))]
       [`(int ,n) e]
       [`(reg ,r) e]
       [`(callq read_int) e]
@@ -328,6 +331,160 @@
           (let ([processedG (build-interference-helper g afters es)])
             `(program (,vars ,g) ,@es)))))
 
+(define (color-graph g vars)
+  (let ([rg (make-graph vars)])
+    (while (not (null? vars))
+      (set! vars (sort vars (lambda (a b)
+      (let ([neighborsA (set->list (adjacent g a))]
+            [neighborsB (set->list (adjacent g b))])
+            (let ([countColored (lambda (n)
+                                  (if (null? (adjacent rg n))
+                                      0
+                                      1))])
+                  (let ([countA (apply + (map countColored neighborsA))]
+                        [countB (apply + (map countColored neighborsB))])
+                        (>= countA countB)))))))
+      (let ([mostSaturated (car vars)])
+        (let ([neighbors (set->list (adjacent g mostSaturated))])
+          (let ([lowestColor (let ([neighborColors (map (lambda (n) (if (set-empty? (adjacent rg n))
+                                                                          #f
+                                                                          (car (set->list (adjacent rg n))))) neighbors)])
+            (let loop ([lowestColor 0])
+              (if (member? neighborColors lowestColor)
+                  (loop (+ 1 lowestColor))
+                  lowestColor)))])
+            (add-edge rg mostSaturated lowestColor)
+            (set! vars (remove mostSaturated vars))))))
+    rg))
+
+(define (remove-all ls toRemove)
+  (if (null? ls)
+      '()
+      (let ([cur (car ls)])
+        (if (eq? cur toRemove)
+          (remove-all (cdr ls) toRemove)
+          (cons cur (remove-all (cdr ls) toRemove))))))
+
+(define (allocate-registers-helper e regs)
+  (let* ([vars (caadr e)]
+         [g (cadadr e)]
+         [cg (color-graph g vars)]
+         [es (cddr e)])
+    (let ([colors (set->list (list->set (map (lambda (var) (car (set->list (adjacent cg var)))) vars)))])
+      (let loop1 ([colors colors]
+                  [regs regs]
+                  [locs '()])
+            (cond
+              [(null? colors)
+                (let* ([varlocs (map (lambda (var)
+                                            (let ([color (car (set->list (adjacent cg var)))])
+                                                `(,var ,(car (lookup color locs))))) vars)]
+                       [size (if (null? varlocs)
+                                  0
+                                  (let ([foundSize (car (sort (map (lambda (loc)
+                                              (if (number? (cadr loc))
+                                                  (abs (cadr loc))
+                                                  -1)) varlocs) >))])
+                                                  (if (< foundSize 0)
+                                                      0
+                                                      foundSize)))]
+                       [helper (assign-home-helper varlocs)])
+                      `(program ,size ,@(map helper es)))]
+              [(null? regs)
+                (let loop ([cleft colors]
+                          [locs locs]
+                          [size 0])
+                            (if (null? cleft)
+                                (loop1 '() '() locs)
+                                (loop (cdr cleft) (append locs `((,(car cleft) ,(+ 16 size)))) (+ 16 size))))]
+              [else
+                (loop1 (cdr colors) (cdr regs) (append locs `((,(car colors) ,(car regs)))))])))))
+
+(define (allocate-registers e)
+  (allocate-registers-helper e '(rbx rcx rdx)))
+
+(define (print-x86-with-call-conventions e)
+  (match e
+    [`(program ,var ,es ...)
+            (let loop ([body (map print-x86-with-call-conventions es)]
+                        [str (string-append
+                              ".global _main\n"
+                              "_main:\n"
+                              "\tpushq %rbp\n"
+                              "\tpushq %rsp\n"
+                              "\tpushq %rbx\n"
+                              "\tpushq %r12\n"
+                              "\tpushq %r13\n"
+                              "\tpushq %r14\n"
+                              "\tpushq %r15\n"
+                              "\tmovq %rsp, %rbp\n"
+                              "\tsubq $"
+                              (number->string var)
+                              ", %rsp\n")])
+                  (if (null? body)
+                    (string-append
+                      str
+                      "\tmovq %rax, %rdi\n"
+                      "\tcallq _print_int\n"
+                      "\tmovq $0, %rax\n"
+                      "\taddq $"
+                      (number->string var)
+                      ", %rsp\n"
+                      "\tpopq %r15\n"
+                      "\tpopq %r14\n"
+                      "\tpopq %r13\n"
+                      "\tpopq %r12\n"
+                      "\tpopq %rbx\n"
+                      "\tpopq %rsp\n"
+                      "\tpopq %rbp\n"
+                      "\tretq\n"
+                      )
+                    (loop (cdr body) (string-append str (car body))))
+              )]
+    [`(int ,n)
+            (string-append "$" (number->string n))]
+    [`(reg ,r)
+            (string-append "%" (symbol->string r))]
+    [`(callq read_int)
+            (string-append
+              "\tpushq %rdx\n"
+              "\tpushq %rcx\n"
+              "\tpushq %rsi\n"
+              "\tpushq %rdi\n"
+              "\tpushq %r8\n"
+              "\tpushq %r9\n"
+              "\tpushq %r10\n"
+              "\tpushq %r11\n"
+              "\tcallq _read_int\n"
+              "\tpopq %r11\n"
+              "\tpopq %r10\n"
+              "\tpopq %r9\n"
+              "\tpopq %r8\n"
+              "\tpopq %rdi\n"
+              "\tpopq %rsi\n"
+              "\tpopq %rcx\n"
+              "\tpopq %rdx\n")]
+    [`(deref ,reg ,dis)
+            (string-append
+              (number->string dis)
+              "(%"
+              (symbol->string reg)
+              ")")]
+    [`(negq ,op1)
+            (string-append
+              "\tnegq "
+              (print-x86-with-call-conventions op1)
+              "\n")]
+    [`(,o ,op1 ,op2)
+            (string-append
+              "\t"
+              (symbol->string o)
+              " "
+              (print-x86-with-call-conventions op1)
+              ", "
+              (print-x86-with-call-conventions op2)
+              (string-append "\n"))]))
+
 (define r0-passes
   `(("flipper" ,flipper ,interp-scheme)
      ("partial evaluator" ,pe-arith ,interp-scheme)
@@ -340,4 +497,15 @@
     ("assign-home" ,assign-home ,null)
     ("patch-instructions" ,patch-instructions ,null)
     ("print-x86" ,print-x86 ,interp-x86)
+  ))
+
+(define r1-with-register-allocation-passes
+  `(("uniquify" ,uniquify ,null)
+    ("flatten" ,flatten ,null)
+    ("select-instructions" ,select-instructions ,null)
+    ("uncover-live" ,uncover-live ,null)
+    ("build-interference" ,build-interference ,null)
+    ("allocate-registers" ,allocate-registers ,null)
+    ("patch-instructions" ,patch-instructions ,null)
+    ("print-x86-with-call-conventions" ,print-x86-with-call-conventions ,interp-x86)
   ))
