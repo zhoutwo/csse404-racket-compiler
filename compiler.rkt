@@ -279,7 +279,7 @@
 (define (uncover-live-helper e ls)
   (match e
     [`(program ,vars ,es ...)
-      `(program (,vars ,(uncover-live-helper es ls)) ,es)]
+      `(program (,vars ,(uncover-live-helper es ls)) ,@es)]
     [else
       (let loop ([es (reverse e)]
                   [ls ls])
@@ -290,6 +290,43 @@
 
 (define (uncover-live e)
   (uncover-live-helper e '(())))
+
+(define (build-interference-helper g afters es)
+  (if (null? afters)
+      g
+      (let ([currentA (car afters)]
+            [currentE (car es)])
+            (match currentE
+              [`(movq (var ,s) (var ,d))
+                    (begin
+                      (map (lambda (v)
+                              (if (and (not (eq? v d)) (not (eq? v s)))
+                                  (begin (add-edge g d v) (add-edge g v d))
+                                  "Useless value")) currentA)
+                      (build-interference-helper g (cdr afters) (cdr es)))]
+              [`(movq ,rest (var ,d))
+                    (begin
+                      (map (lambda (v)
+                              (if (not (eq? v d))
+                                  (begin (add-edge g d v) (add-edge g v d))
+                                  "Useless value")) currentA)
+                      (build-interference-helper g (cdr afters) (cdr es)))]
+              [`(addq ,rest (var ,d))
+                    (begin
+                      (map (lambda (v)
+                              (if (not (eq? v d))
+                                  (begin (add-edge g d v) (add-edge g v d))
+                                  "Useless value")) currentA)
+                      (build-interference-helper g (cdr afters) (cdr es)))]
+              [else (build-interference-helper g (cdr afters) (cdr es))]))))
+
+(define (build-interference e)
+  (let ([vars (caadr e)]
+        [afters (cadadr e)]
+        [es (cddr e)])
+        (let ([g (make-graph vars)])
+          (let ([processedG (build-interference-helper g afters es)])
+            `(program (,vars ,g) ,@es)))))
 
 (define r0-passes
   `(("flipper" ,flipper ,interp-scheme)
