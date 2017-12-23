@@ -5,6 +5,8 @@
 
 (provide r0-passes r1-passes)
 
+;; Begin R0 compiler
+
 (define (flipper e)
   (match e
     [(? fixnum?) e]
@@ -30,6 +32,8 @@
     [`(+ ,e1 ,e2) (pe-add (pe-arith e1) (pe-arith e2))]
     [`(program ,e) `(program ,(pe-arith e))]
     ))
+
+;; Beging R1 compiler
 
 (define (find-sym alist var)
   (if (null? alist)
@@ -244,6 +248,48 @@
               ", "
               (print-x86 op2)
               (string-append "\n"))]))
+
+;; Begin R1 compiler with register allocation code
+(define (vars-read e)
+  (match e
+    [`(addq (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(addq (var ,v) ,rest) `(,v)]
+    [`(addq ,rest (var ,v)) `(,v)]
+    [`(movq (var ,v) ,rest) `(,v)]
+    [`(negq (var ,v)) `(,v)]
+    [else '()]))
+
+(define (vars-write e)
+  (match e
+    [`(addq ,rest (var ,v)) `(,v)]
+    [`(movq ,rest (var ,v)) `(,v)]
+    [`(negq (var ,v)) `(,v)]
+    [else '()]))
+
+(define (last ls)
+  (if (null? (cdr ls))
+    (car ls)
+    (last (cdr ls))))
+
+(define (make-before after e)
+  (let ([W (vars-write e)]
+        [R (vars-read e)])
+        (set-union (set-subtract after W) R)))
+
+(define (uncover-live-helper e ls)
+  (match e
+    [`(program ,vars ,es ...)
+      `(program (,vars ,(uncover-live-helper es ls)) ,es)]
+    [else
+      (let loop ([es (reverse e)]
+                  [ls ls])
+          (if (null? (cdr es)) ls
+              (let* ([after (car ls)]
+                    [before (make-before after (car es))])
+                (loop (cdr es) (cons before ls)))))]))
+
+(define (uncover-live e)
+  (uncover-live-helper e '(())))
 
 (define r0-passes
   `(("flipper" ,flipper ,interp-scheme)
