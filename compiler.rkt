@@ -485,6 +485,78 @@
               (print-x86-with-call-conventions op2)
               (string-append "\n"))]))
 
+;; Beging R2 compiler
+(define (typecheck-R2 env)
+  (lambda (e)
+    (define recur (typecheck-R2 env))
+    (match e
+        [(? fixnum?) 'Integer]
+        [(? boolean?) 'Boolean]
+        [(? symbol?) (lookup e env)]
+        [`(eq? ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error "eq? expects two Integers" i1 i2)
+                      'Boolean))]
+        [`(< ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error "< expects two Integers" i1 i2)
+                      'Boolean))]
+        [`(<= ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error "<= expects two Integers" i1 i2)
+                      'Boolean))]
+        [`(> ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error "> expects two Integers" i1 i2)
+                      'Boolean))]
+        [`(>= ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error ">= expects two Integers" i1 i2)
+                      'Boolean))]
+        [`(+ ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Integer))
+                          (not (eq? t2 'Integer)))
+                      (error "+ expects two Integers" i1 i2)
+                      'Integer))]
+        [`(- ,i)
+            (let ([t (recur i)])
+                  (if (not (eq? t 'Integer))
+                      (error "- expects an Integer" i)
+                      'Integer))]
+        [`(read) 'Integer]
+        [`(let ([,x ,(app recur T)]) ,body)
+              (define new-env (cons (cons x T) env))
+              ((typecheck-R2 new-env) body)]
+        [`(if ,(app recur con) ,thn ,alt)
+            (if (not (eq? con 'Boolean))
+              (error "if expects Boolean condition" con)
+              (recur thn))]
+        [`(not ,(app (typecheck-R2 env) T))
+              (match T
+                ['Boolean 'Boolean]
+                [else (error "'not' expects a Boolean" e)])]
+        [`(program ,body)
+            (define ty ((typecheck-R2 '()) body))
+                `(program (type ,ty) ,body)])))
+
+
 (define r0-passes
   `(("flipper" ,flipper ,interp-scheme)
      ("partial evaluator" ,pe-arith ,interp-scheme)
