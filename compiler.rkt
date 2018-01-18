@@ -3,7 +3,7 @@
 (require "interp.rkt")
 (require "utilities.rkt")
 
-(provide r0-passes r1-passes r1-with-register-allocation-passes)
+(provide r0-passes r1-passes r1-with-register-allocation-passes typecheck-R2 flatten)
 
 ;; Begin R0 compiler
 
@@ -99,6 +99,7 @@
     (match e
       [(? symbol?) (values e '() (cons e alist))]
       [(? integer?) (values e '() alist)]
+      [(? boolean?) (values e '() alist)]
       [`(let ([,x ,e]) ,body)
           (begin
             (define-values (lastLetSym flattenedLet letAllVars) ((flatten-helper alist) e))
@@ -106,6 +107,14 @@
             (values lastBodySym
                       (append flattenedLet `((assign ,x ,lastLetSym)) flattenedBody)
                       (cons x letBodyVars)))]
+      [`(program ,type ,e)
+              (begin
+                (display 'a)
+                (define-values (lastSym flattened allVars) ((flatten-helper alist) e))
+                (values
+                  '()
+                  `(program ,type ,(remove-repeated allVars) ,@flattened (return ,lastSym))
+                  allVars))]
       [`(program ,e)
               (begin
                 (define-values (lastSym flattened allVars) ((flatten-helper alist) e))
@@ -119,6 +128,23 @@
                     newSym
                     `((assign ,newSym (read)))
                     (cons newSym alist)))]
+      [`(if ,cond ,thn ,alt)
+              (begin
+                (define-values (lastCondSym condFlattened allVars) ((flatten-helper alist) cond))
+                (define-values (lastThnSym thnFlattened allVars1) ((flatten-helper allVars) thn))
+                (define-values (lastAltSym altFlattened allVars2) ((flatten-helper allVars1) alt))
+                (let ([ifSym (gensym)])
+                  (display (append condFlattened
+                                  `((if (eq? #t ,lastCondSym)
+                                      (,@thnFlattened (assign ,ifSym ,lastThnSym))
+                                      (,@altFlattened (assign ,ifSym ,lastAltSym))))))
+                  (newline)(newline)
+                  (values ifSym
+                          (append condFlattened
+                                  `((if (eq? #t ,lastCondSym)
+                                      (,@thnFlattened (assign ,ifSym ,lastThnSym))
+                                      (,@altFlattened (assign ,ifSym ,lastAltSym)))))
+                          (cons ifSym allVars2))))]
       [`(,op ,es ...)
               (begin
                 (define-values (lastSym flattened allVars) (map3 (flatten-helper alist) es))
@@ -127,8 +153,7 @@
                       [allVars (remove-repeated (apply append (cleanList allVars)))])
                   (values newSym
                           (append (apply append flattened) `((assign ,newSym (,op ,@lastSym))))
-                          (cons newSym allVars))))
-              ])))
+                          (cons newSym allVars))))])))
 
 (define (flatten e)
   (define-values (a b c) ((flatten-helper '()) e))
@@ -493,13 +518,7 @@
         [(? fixnum?) 'Integer]
         [(? boolean?) 'Boolean]
         [(? symbol?) (lookup e env)]
-        [`(eq? ,i1 ,i2)
-            (let ([t1 (recur i1)]
-                  [t2 (recur i2)])
-                  (if (or (not (eq? t1 'Integer))
-                          (not (eq? t2 'Integer)))
-                      (error "eq? expects two Integers" i1 i2)
-                      'Boolean))]
+        [`(eq? ,i1 ,i2) 'Boolean)]
         [`(< ,i1 ,i2)
             (let ([t1 (recur i1)]
                   [t2 (recur i2)])
