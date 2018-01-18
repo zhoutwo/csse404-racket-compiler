@@ -3,7 +3,7 @@
 (require "interp.rkt")
 (require "utilities.rkt")
 
-(provide r0-passes r1-passes r1-with-register-allocation-passes typecheck-R2-helper flatten r2-passes)
+(provide r0-passes r1-passes r1-with-register-allocation-passes typecheck-R2 r2-passes)
 
 ;; Begin R0 compiler
 
@@ -48,10 +48,15 @@
     (match e
       [(? symbol?) (find-sym alist e)]
       [(? integer?) e]
+      [(? boolean?) e]
       [`(let ([,x ,e]) ,body)
               (let ([newsym (gensym)])
                 `(let ([,newsym ,((uniquify-helper alist) e)])
                     ,((uniquify-helper (cons (list x newsym) alist)) body)))]
+      [`(if ,cond ,thn, alt)
+              `(if ,((uniquify-helper alist) cond)
+                   ,((uniquify-helper alist) thn)
+                   ,((uniquify-helper alist) alt))]
       [`(program (type ,t) ,e)
               `(program (type ,t) ,((uniquify-helper alist) e))]
       [`(program ,e)
@@ -141,6 +146,8 @@
                                       (,@thnFlattened (assign ,ifSym ,lastThnSym))
                                       (,@altFlattened (assign ,ifSym ,lastAltSym)))))
                           (cons ifSym allVars2))))]
+      [`(and ,op1 ,op2)
+              ((flatten-helper alist) `(if ,op1 ,op2 #f))]
       [`(,op ,es ...)
               (begin
                 (define-values (lastSym flattened allVars) (map3 (flatten-helper alist) es))
@@ -213,15 +220,20 @@
     [`(assign ,lhs (not ,op1))
             (let ([op1 (car (select-instructions op1))]
                   [lhs (car (select-instructions lhs))])
-                  `((xorq 1 ,op1)
+                  `((movq ,op1 (reg rax))
+                    (xorq (int 1) (reg rax))
+                    (movq (int 1) (reg rbx))
+                    (cmpq (reg rbx) (reg rax))
                     (set e (byte-reg al))
                     (movzbq (byte-reg al) ,lhs)))]
     [`(assign ,lhs ,num)
             `((movq ,@(select-instructions num) ,@(select-instructions lhs)))]
     [`(return ,arg)
             `((movq ,@(select-instructions arg) (reg rax)))]
-    [`(if cond thns alts)
-            `(,e)]
+    [`(if ,cond ,thns ,alts)
+            `((if (eq? ,@(select-instructions (cadr cond)) ,@(select-instructions (caddr cond)))
+                 ,(apply append (map select-instructions thns))
+                 ,(apply append (map select-instructions alts))))]
     [`(program ,var (type ,t) ,e ...)
             `(program ,var (type ,t) ,@(apply append (map select-instructions e)))]
     [`(program ,var ,e ...)
@@ -251,8 +263,12 @@
       [`(callq read_int) e]
       [`(if (eq? ,v1 ,v2) ,thn ,thnlive ,alt ,altlive)
               `(if (eq? ,((assign-home-helper varlocs) v1) ,((assign-home-helper varlocs) v2))
-                  ,((assign-home-helper varlocs) thn)
-                  ,((assign-home-helper varlocs) alt))]
+                  ,(map (assign-home-helper varlocs) thn)
+                  ,(map (assign-home-helper varlocs) alt))]
+      [`(if (eq? ,v1 ,v3) ,thn ,alt)
+            (error "shouldnot happen" 1)]
+      [`(set ,cc ,var)
+              `(set ,cc ,((assign-home-helper varlocs) var))]
       [`(,o ,op1)
               (let ([e1 ((assign-home-helper varlocs) op1)])
                 `(negq ,e1))]
@@ -265,6 +281,8 @@
   (match e
     [`(program ,var ,e ...)
             `(program ,var ,@(apply append (map patch-instructions e)))]
+    [`(program ,var (type ,t) ,e ...)
+            `(program ,var (type ,t) ,@(apply append (map patch-instructions e)))]
     [`(movq (deref rbp ,l1) (deref rbp ,l2))
             `((movq (deref rbp ,l1) (reg rax))
               (movq (reg rax) (deref rbp ,l2)))]
@@ -335,6 +353,27 @@
     [`(addq (var ,v1) (var ,v2)) `(,v1 ,v2)]
     [`(addq (var ,v) ,rest) `(,v)]
     [`(addq ,rest (var ,v)) `(,v)]
+    [`(cmpq (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(cmpq (var ,v) ,rest) `(,v)]
+    [`(cmpq ,rest (var ,v)) `(,v)]
+    [`(xorq (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(xorq (var ,v) ,rest) `(,v)]
+    [`(xorq ,rest (var ,v)) `(,v)]
+    [`(eq? (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(eq? (var ,v) ,rest) `(,v)]
+    [`(eq? ,rest (var ,v)) `(,v)]
+    [`(> (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(> (var ,v) ,rest) `(,v)]
+    [`(> ,rest (var ,v)) `(,v)]
+    [`(>= (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(>= (var ,v) ,rest) `(,v)]
+    [`(>= ,rest (var ,v)) `(,v)]
+    [`(<= (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(<= (var ,v) ,rest) `(,v)]
+    [`(<= ,rest (var ,v)) `(,v)]
+    [`(< (var ,v1) (var ,v2)) `(,v1 ,v2)]
+    [`(< (var ,v) ,rest) `(,v)]
+    [`(< ,rest (var ,v)) `(,v)]
     [`(movq (var ,v) ,rest) `(,v)]
     [`(negq (var ,v)) `(,v)]
     [`(eq? (var ,v1) (var ,v2)) `(,v1 ,v2)]
@@ -345,6 +384,13 @@
 (define (vars-write e)
   (match e
     [`(addq ,rest (var ,v)) `(,v)]
+    [`(cmpq ,rest (var ,v)) `(,v)]
+    [`(eq? ,rest (var ,v)) `(,v)]
+    [`(> ,rest (var ,v)) `(,v)]
+    [`(>= ,rest (var ,v)) `(,v)]
+    [`(<= ,rest (var ,v)) `(,v)]
+    [`(< ,rest (var ,v)) `(,v)]
+    [`(xorq ,rest (var ,v)) `(,v)]
     [`(movq ,rest (var ,v)) `(,v)]
     [`(negq (var ,v)) `(,v)]
     [else '()]))
@@ -361,25 +407,25 @@
 
 (define (uncover-live-helper e ls)
   (match e
-    [`(program ,vars ,es ...)
-      (begin
-          (define-values (lives ees) (uncover-live-helper es ls))
-          `(program (,vars ,(cdr lives)) ,@(reverse ees)))]
     [`(program ,vars (type ,t) ,es ...)
       (begin
           (define-values (lives ees) (uncover-live-helper es ls))
           `(program (,vars ,(cdr lives) (type ,t)) ,@(reverse ees)))]
+    [`(program ,vars ,es ...)
+      (begin
+          (define-values (lives ees) (uncover-live-helper es ls))
+          `(program (,vars ,(cdr lives)) ,@(reverse ees)))]
     [else
       (let loop ([es (reverse e)]
                  [ls ls])
           (if (null? es) (values ls es)
               (match (car es)
                 [`(if (eq? ,v1 ,v2) ,thn ,alt)
-                    (let ([thnlive (uncover-live-helper thn ls)]
-                          [altlive (uncover-live-helper alt ls)])
-                          (let ([before (set-union (car thnlive) (car altlive) (vars-read `(eq? ,v1 ,v2)))])
-                              (define-values (lls ees) (loop (cdr es) (cons before ls)))
-                              (values lls (cons `(if (eq? ,v1 ,v2) ,thn ,thnlive ,alt ,altlive) ees))))]
+                    (let-values ([(thnlive thn) (uncover-live-helper thn ls)]
+                                  [(altlive alt) (uncover-live-helper alt ls)])
+                                  (let ([before (set-union (car thnlive) (car altlive) (vars-read `(eq? ,v1 ,v2)))])
+                                      (define-values (lls ees) (loop (cdr es) (cons before ls)))
+                                      (values lls (cons `(if (eq? ,v1 ,v2) ,(reverse thn) ,thnlive ,(reverse alt) ,altlive) ees))))]
                 [else
                     (let* ([after (car ls)]
                            [before (make-before after (car es) ls)])
@@ -390,7 +436,7 @@
   (uncover-live-helper e '(())))
 
 (define (build-interference-helper g afters es)
-  (if (null? afters)
+  (if (null? es)
       g
       (let ([currentA (car afters)]
             [currentE (car es)])
@@ -399,6 +445,20 @@
                     (begin
                       (build-interference-helper g thnlive thn)
                       (build-interference-helper g altlive alt)
+                      (build-interference-helper g (cdr afters) (cdr es)))]
+              [`(cmpq (var ,s) (var ,d))
+                    (begin
+                      (map (lambda (v)
+                              (if (and (not (eq? v d)) (not (eq? v s)))
+                                  (begin (add-edge g d v) (add-edge g v d))
+                                  "Useless value")) currentA)
+                      (build-interference-helper g (cdr afters) (cdr es)))]
+              [`(cmpq ,rest (var ,d))
+                    (begin
+                      (map (lambda (v)
+                              (if (not (eq? v d))
+                                  (begin (add-edge g d v) (add-edge g v d))
+                                  "Useless value")) currentA)
                       (build-interference-helper g (cdr afters) (cdr es)))]
               [`(movq (var ,s) (var ,d))
                     (begin
@@ -474,8 +534,6 @@
               [else (build-interference-helper g (cdr afters) (cdr es))]))))
 
 (define (build-interference e)
-  (newline)
-  (pretty-print e)
   (match e
     [`(program (,vars ,afters) ,es ...)
         (let ([g (make-graph vars)])
@@ -484,21 +542,21 @@
     [`(program (,vars ,afters (type ,t)) ,es ...)
         (match (build-interference `(program (,vars ,afters) ,@es))
           [`(program (,vars ,g) ,es ...)
-            `(program (,vars ,afters (type ,t)) ,@es)])]))
+            `(program (,vars ,g (type ,t)) ,@es)])]))
 
 (define (color-graph g vars)
   (let ([rg (make-graph vars)])
     (while (not (null? vars))
       (set! vars (sort vars (lambda (a b)
-      (let ([neighborsA (set->list (adjacent g a))]
-            [neighborsB (set->list (adjacent g b))])
-            (let ([countColored (lambda (n)
-                                  (if (null? (adjacent rg n))
-                                      0
-                                      1))])
-                  (let ([countA (apply + (map countColored neighborsA))]
-                        [countB (apply + (map countColored neighborsB))])
-                        (>= countA countB)))))))
+                              (let ([neighborsA (set->list (adjacent g a))]
+                                    [neighborsB (set->list (adjacent g b))])
+                                    (let ([countColored (lambda (n)
+                                                          (if (null? (adjacent rg n))
+                                                              0
+                                                              1))])
+                                          (let ([countA (apply + (map countColored neighborsA))]
+                                                [countB (apply + (map countColored neighborsB))])
+                                                (>= countA countB)))))))
       (let ([mostSaturated (car vars)])
         (let ([neighbors (set->list (adjacent g mostSaturated))])
           (let ([lowestColor (let ([neighborColors (map (lambda (n) (if (set-empty? (adjacent rg n))
@@ -522,6 +580,10 @@
 
 (define (allocate-registers-helper e regs)
   (match e
+    [`(program (,vars ,g (type ,t)) ,es ...)
+        (match (allocate-registers-helper `(program (,vars ,g) ,@es) regs)
+          [`(program ,size ,es ...)
+              `(program ,size (type ,t) ,@es)])]
     [`(program (,vars ,g) ,es ...)
       (let* ([cg (color-graph g vars)]
              [colors (set->list (list->set (map (lambda (var) (car (set->list (adjacent cg var)))) vars)))])
@@ -552,14 +614,10 @@
                                     (loop1 '() '() locs)
                                     (loop (cdr cleft) (append locs `((,(car cleft) ,(+ 16 size)))) (+ 16 size))))]
                   [else
-                    (loop1 (cdr colors) (cdr regs) (append locs `((,(car colors) ,(car regs)))))])))]
-    [`(program (,vars ,g (type ,t)) ,es)
-        (match (allocate-registers-helper `(program (,vars ,g) ,@es) regs)
-          [`(program ,size ,es)
-              `(program ,size (type ,t) ,@es)])]))
+                    (loop1 (cdr colors) (cdr regs) (append locs `((,(car colors) ,(car regs)))))])))]))
 
 (define (allocate-registers e)
-  (allocate-registers-helper e '(rbx rcx rdx)))
+  (allocate-registers-helper e (vector->list registers-for-alloc)))
 
 (define (print-x86-with-call-conventions e)
   (match e
@@ -651,7 +709,12 @@
         [(? fixnum?) 'Integer]
         [(? boolean?) 'Boolean]
         [(? symbol?) (lookup e env)]
-        [`(eq? ,i1 ,i2) 'Boolean]
+        [`(eq? ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (not (eq? t1 t2))
+                      (error `typecheck-R2-helper "eq? shoud have same type of operands: ~a, ~a" i1 i2)
+                      'Boolean))]
         [`(< ,i1 ,i2)
             (let ([t1 (recur i1)]
                   [t2 (recur i2)])
@@ -687,6 +750,13 @@
                           (not (eq? t2 'Integer)))
                       (error "+ expects two Integers" i1 i2)
                       'Integer))]
+        [`(and ,i1 ,i2)
+            (let ([t1 (recur i1)]
+                  [t2 (recur i2)])
+                  (if (or (not (eq? t1 'Boolean))
+                          (not (eq? t2 'Boolean)))
+                      (error "and expects two Booleans" i1 i2)
+                      'Boolean))]
         [`(- ,i)
             (let ([t (recur i)])
                   (if (not (eq? t 'Integer))
@@ -698,8 +768,12 @@
               ((typecheck-R2-helper new-env) body)]
         [`(if ,(app recur con) ,thn ,alt)
             (if (not (eq? con 'Boolean))
-              (error "if expects Boolean condition" con)
-              (recur thn))]
+              (error `typecheck-R2-helper "if expects Boolean condition: ~a" con)
+              (let ([thnt (recur thn)]
+                    [altt (recur alt)])
+                    (if (not (eq? thnt altt))
+                        (error `typecheck-R2-helper "if shoud have same type of thn and alt clauses: ~a, ~a" thn alt)
+                        thnt)))]
         [`(not ,(app (typecheck-R2-helper env) T))
               (match T
                 ['Boolean 'Boolean]
@@ -709,29 +783,36 @@
                 `(program (type ,ty) ,body)])))
 
 (define (typecheck-R2 e)
-  ((typecheck-R2 '()) e))
+  ((typecheck-R2-helper '()) e))
+
+(define (lower-conditionals-helper es ees)
+  (if (null? es) ees
+    (match es
+      [`(program ,size (type ,t) ,es ...)
+          (let ([ees (lower-conditionals-helper es ees)])
+                `(program ,size (type ,t) ,@ees))]
+      [else (let ([e (car es)])
+                (match e
+                    [`(if (eq? ,v1 ,v2) ,thn ,alt)
+                        (let ([thenlabel (gensym)]
+                              [endlabel (gensym)])
+                              (lower-conditionals-helper (cdr es)
+                                    (append ees `((cmpq ,v2 ,v1)
+                                                  (jmp-if e ,thenlabel)
+                                                  ,@(apply append (map lower-conditionals `(,alt)))
+                                                  (jmp ,endlabel)
+                                                  (label ,thenlabel)
+                                                  ,@(apply append (map lower-conditionals `(,thn)))
+                                                  (label ,endlabel)))))]
+                    [else (lower-conditionals-helper (cdr es) (append ees `(,e)))]))])))
 
 (define (lower-conditionals e)
-  (match e
-    [`(program ,size (type ,t) ,es ...)
-        `(program ,size (type ,t) ,@(append (map (lambda (e)
-            (match e
-              [`(if (eq? ,v1 ,v2) ,thn ,alt)
-                  (let ([thenlabel (gensym)]
-                        [endlabel (gensym)])
-                        `((cmpq ,v2 ,v1)
-                          (jmp-if e ,thenlabel)
-                          ,@alt
-                          (jmp ,endlabel)
-                          (label ,thenlabel)
-                          ,@thn
-                          (label ,endlabel)))]
-              [else e])) es)))]))
+  (lower-conditionals-helper e '()))
 
 (define (print-x86-R2 e)
   (match e
     [`(program ,var (type ,t) ,es ...)
-            (let loop ([body (map print-x86-with-call-conventions es)]
+            (let loop ([body (map print-x86-R2 es)]
                         [str (string-append
                               ".global _main\n"
                               "_main:\n"
@@ -768,6 +849,28 @@
                       )
                     (loop (cdr body) (string-append str (car body))))
               )]
+    [`(jmp-if ,cc ,l)
+            (string-append "\tj" (symbol->string cc) " " (symbol->string l) "\n")]
+    [`(jmp ,label)
+            (string-append "\tjmp " (symbol->string label) "\n")]
+    [`(byte-reg ,r)
+            (string-append "%" (symbol->string r))]
+    [`(set ,cc ,reg)
+            (string-append "\tset" (symbol->string cc) " " (print-x86-R2 reg)"\n")]
+    [`(cmpq ,v1 ,v2)
+            (string-append "\tcmpq "
+                          (print-x86-R2 v1)
+                          ", "
+                          (print-x86-R2 v2)
+                          "\n")]
+    [`(xorq ,v1 ,v2)
+            (string-append "\txorq "
+                          (print-x86-R2 v1)
+                          ", "
+                          (print-x86-R2 v2)
+                          "\n")]
+    [`(label ,l)
+            (string-append (symbol->string l) ":\n")]
     [`(int ,n)
             (string-append "$" (number->string n))]
     [`(reg ,r)
@@ -800,16 +903,16 @@
     [`(negq ,op1)
             (string-append
               "\tnegq "
-              (print-x86-with-call-conventions op1)
+              (print-x86-R2 op1)
               "\n")]
     [`(,o ,op1 ,op2)
             (string-append
               "\t"
               (symbol->string o)
               " "
-              (print-x86-with-call-conventions op1)
+              (print-x86-R2 op1)
               ", "
-              (print-x86-with-call-conventions op2)
+              (print-x86-R2 op2)
               (string-append "\n"))]))
 
 (define r0-passes
@@ -838,8 +941,7 @@
   ))
 
 (define r2-passes
-  `(("typecheck-R2" ,typecheck-R2 ,null)
-    ("uniquify" ,uniquify ,null)
+  `(("uniquify" ,uniquify ,null)
     ("flatten" ,flatten ,null)
     ("select-instructions" ,select-instructions ,null)
     ("uncover-live" ,uncover-live ,null)
@@ -847,5 +949,5 @@
     ("allocate-registers" ,allocate-registers ,null)
     ("lower-conditionals" ,lower-conditionals ,null)
     ("patch-instructions" ,patch-instructions ,null)
-    ("print-x86-R2" ,print-x86-with-call-conventions ,interp-x86)
+    ("print-x86-R2" ,print-x86-R2 ,interp-x86)
   ))

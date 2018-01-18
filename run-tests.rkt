@@ -11,9 +11,11 @@
 
 (debug-level 4)
 
-;(compiler-tests "compiler.rkt" (lambda (e) '()) r1-passes "r1" (make-list 48))
-;(compiler-tests "compiler.rkt" (lambda (e) '()) r1-passes "r1a" (make-list 8))
+(compiler-tests "compiler.rkt" (lambda (e) '()) r1-passes "r1" (make-list 48))
+(compiler-tests "compiler.rkt" (lambda (e) '()) r1-passes "r1a" (make-list 8))
 
 (compiler-tests "compiler.rkt" (lambda (e) '()) r1-with-register-allocation-passes "r1" (make-list 48))
 (compiler-tests "compiler.rkt" (lambda (e) '()) r1-with-register-allocation-passes "r1a" (make-list 8))
+
+(compiler-tests "compiler.rkt" typecheck-R2 r2-passes "r2" (make-list 59))
 (newline) (display "tests passed!") (newline)
